@@ -1,4 +1,4 @@
-thinkpad-trackpoint
-===================
+FreeBSD PSM driver patch to support TrackPoint
+==============================================
 
-Patch for psm driver in FreeBSD to support ThinkPad TrackPoint.
+For more info, see the PR: http://www.freebsd.org/cgi/query-pr.cgi?pr=147237
