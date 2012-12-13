@@ -1,0 +1,399 @@
+--- sys/dev/atkbdc/psm.c.orig	2009-08-20 22:23:28.000000000 +0200
++++ sys/dev/atkbdc/psm.c	2010-05-30 12:44:29.000000000 +0200
+@@ -261,6 +261,38 @@
+ 	int			in_vscroll;
+ } synapticsaction_t;
+ 
++enum {
++	TRACKPOINT_SYSCTL_SENSITIVITY,
++	TRACKPOINT_SYSCTL_NEGATIVE_INERTIA,
++	TRACKPOINT_SYSCTL_UPPER_PLATEAU,
++	TRACKPOINT_SYSCTL_BACKUP_RANGE,
++	TRACKPOINT_SYSCTL_DRAG_HYSTERESIS,
++	TRACKPOINT_SYSCTL_MINIMUM_DRAG,
++	TRACKPOINT_SYSCTL_UP_THRESHOLD,
++	TRACKPOINT_SYSCTL_THRESHOLD,
++	TRACKPOINT_SYSCTL_JENKS_CURVATURE,
++	TRACKPOINT_SYSCTL_Z_TIME,
++	TRACKPOINT_SYSCTL_PRESS_TO_SELECT,
++	TRACKPOINT_SYSCTL_SKIP_BACKUPS
++};
++
++typedef struct trackpointinfo {
++	struct sysctl_ctx_list sysctl_ctx;
++	struct sysctl_oid *sysctl_tree;
++	int	sensitivity;
++	int	inertia;
++	int	uplateau;
++	int	reach;
++	int	draghys;
++	int	mindrag;
++	int	upthresh;
++	int	threshold;
++	int	jenks;
++	int	ztime;
++	int	pts;
++	int	skipback;
++} trackpointinfo_t;
++
+ /* driver control block */
+ struct psm_softc {		/* Driver status information */
+ 	int		unit;
+@@ -275,6 +307,7 @@
+ 	synapticshw_t	synhw;		/* Synaptics hardware information */
+ 	synapticsinfo_t	syninfo;	/* Synaptics configuration */
+ 	synapticsaction_t synaction;	/* Synaptics action context */
++	trackpointinfo_t tpinfo;	/* IBM/Lenovo TrackPoint configuration*/
+ 	mousemode_t	mode;		/* operation mode */
+ 	mousemode_t	dflt_mode;	/* default operation mode */
+ 	mousestatus_t	status;		/* accumulated mouse movement */
+@@ -346,6 +379,9 @@
+ static int synaptics_support = 0;
+ TUNABLE_INT("hw.psm.synaptics_support", &synaptics_support);
+ 
++static int trackpoint_support = 0;
++TUNABLE_INT("hw.psm.trackpoint_support", &trackpoint_support);
++
+ static int verbose = PSM_DEBUG;
+ TUNABLE_INT("debug.psm.loglevel", &verbose);
+ 
+@@ -435,6 +471,7 @@
+ static probefunc_t	enable_mmanplus;
+ static probefunc_t	enable_synaptics;
+ static probefunc_t	enable_versapad;
++static probefunc_t	enable_trackpoint;
+ 
+ static struct {
+ 	int		model;
+@@ -468,6 +505,8 @@
+ 	  0x80, MOUSE_PS2_PACKETSIZE, enable_kmouse },
+ 	{ MOUSE_MODEL_VERSAPAD,		/* Interlink electronics VersaPad */
+ 	  0xe8, MOUSE_PS2VERSA_PACKETSIZE, enable_versapad },
++	{ MOUSE_MODEL_TRACKPOINT,	/* IBM/Lenovo TrackPoint*/
++	  0xc0, MOUSE_TRACKPOINT_PACKETSIZE, enable_trackpoint },
+ 	{ MOUSE_MODEL_GENERIC,
+ 	  0xc0, MOUSE_PS2_PACKETSIZE, NULL },
+ };
+@@ -710,6 +749,7 @@
+ 		{ MOUSE_MODEL_4DPLUS,		"4D+ Mouse" },
+ 		{ MOUSE_MODEL_SYNAPTICS,	"Synaptics Touchpad" },
+ 		{ MOUSE_MODEL_GENERIC,		"Generic PS/2 mouse" },
++		{ MOUSE_MODEL_TRACKPOINT,	"IBM/Lenovo TrackPoint" },
+ 		{ MOUSE_MODEL_UNKNOWN,		"Unknown" },
+ 	};
+ 	int i;
+@@ -3409,6 +3449,7 @@
+ 				goto next;
+ 			break;
+ 
++		case MOUSE_MODEL_TRACKPOINT:
+ 		case MOUSE_MODEL_GENERIC:
+ 		default:
+ 			break;
+@@ -4477,6 +4518,286 @@
+ 	return (TRUE);				/* PS/2 absolute mode */
+ }
+ 
++/* IBM/Lenovo TrackPoint */
++static int
++trackpoint_command(KBDC kbdc, int cmd, int loc, int val)
++{
++	if (send_aux_command(kbdc, 0xe2) != PSM_ACK ||
++	    send_aux_command(kbdc, cmd) != PSM_ACK ||
++	    send_aux_command(kbdc, loc) != PSM_ACK ||
++	    send_aux_command(kbdc, val) != PSM_ACK)
++		return (EIO);
++
++	return (0);
++}
++
++static int
++trackpoint_sysctl(SYSCTL_HANDLER_ARGS)
++{
++	int error, cmd, loc, mask, max, *oldvalp;
++	struct psm_softc *sc = arg1;
++
++	loc = 0;
++	mask = 0;
++	oldvalp = NULL;
++
++	/*
++	 * The value of cmd and max will be 0x81 and 255 respectively for
++	 * the majority of cases, so we set them outside the switch, and
++	 * change them only when needed.
++	 */
++	cmd = 0x81;
++	max = 255;
++
++	switch (arg2) {
++	case TRACKPOINT_SYSCTL_SENSITIVITY:
++		loc = 0x4a;
++		oldvalp = &sc->tpinfo.sensitivity;
++		break;
++	case TRACKPOINT_SYSCTL_NEGATIVE_INERTIA:
++		loc = 0x4d;
++		oldvalp = &sc->tpinfo.inertia;
++		break;
++	case TRACKPOINT_SYSCTL_UPPER_PLATEAU:
++		loc = 0x60;
++		oldvalp = &sc->tpinfo.uplateau;
++		break;
++	case TRACKPOINT_SYSCTL_BACKUP_RANGE:
++		loc = 0x57;
++		oldvalp = &sc->tpinfo.reach;
++		break;
++	case TRACKPOINT_SYSCTL_DRAG_HYSTERESIS:
++		loc = 0x58;
++		oldvalp = &sc->tpinfo.draghys;
++		break;
++	case TRACKPOINT_SYSCTL_MINIMUM_DRAG:
++		loc = 0x59;
++		oldvalp = &sc->tpinfo.mindrag;
++		break;
++	case TRACKPOINT_SYSCTL_UP_THRESHOLD:
++		loc = 0x5a;
++		oldvalp = &sc->tpinfo.upthresh;
++		break;
++	case TRACKPOINT_SYSCTL_THRESHOLD:
++		loc = 0x5c;
++		oldvalp = &sc->tpinfo.threshold;
++		break;
++	case TRACKPOINT_SYSCTL_JENKS_CURVATURE:
++		loc = 0x5d;
++		oldvalp = &sc->tpinfo.jenks;
++		break;
++	case TRACKPOINT_SYSCTL_Z_TIME:
++		loc = 0x5e;
++		oldvalp = &sc->tpinfo.ztime;
++		break;
++	case TRACKPOINT_SYSCTL_PRESS_TO_SELECT:
++		cmd = 0x47;
++		loc = 0x2c;
++		mask = 0x01;
++		max = 1;
++		oldvalp = &sc->tpinfo.pts;
++		break;
++	case TRACKPOINT_SYSCTL_SKIP_BACKUPS:
++		cmd = 0x47;
++		loc = 0x2d;
++		mask = 0x08;
++		max = 1;
++		oldvalp = &sc->tpinfo.skipback;
++		break;
++	default:
++		return (1);
++		/* NOTREACHED */
++	}
++
++	int newval = *oldvalp;
++	if ((error = sysctl_handle_int(oidp, &newval, 0, req)) != 0)
++		return error;
++
++	if (newval == *oldvalp)
++		return (0);
++
++	if (newval < 0 || newval > max)
++		return (EINVAL);
++
++	if ((error = trackpoint_command(sc->kbdc, cmd, loc,
++			mask ? mask : newval)) != 0)
++		return (error);
++	else
++		*oldvalp = newval;
++
++	return (error);
++}
++
++static void
++trackpoint_sysctl_create_tree(struct psm_softc *sc)
++{
++	/* Attach extra trackpoint sysctl nodes under hw.psm.trackpoint */
++	sysctl_ctx_init(&sc->tpinfo.sysctl_ctx);
++	sc->tpinfo.sysctl_tree = SYSCTL_ADD_NODE(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_STATIC_CHILDREN(_hw_psm), OID_AUTO, "trackpoint", CTLFLAG_RD,
++	    0, "IBM/Lenovo TrackPoint");
++
++	/* hw.psm.trackpoint.sensitivity */
++	sc->tpinfo.sensitivity = 0x64;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "sensitivity", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_SENSITIVITY,
++	    trackpoint_sysctl, "I",
++	    "Sensitivity");
++
++	/* hw.psm.trackpoint.negative_inertia */
++	sc->tpinfo.inertia = 0x06;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "negative_inertia", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_NEGATIVE_INERTIA,
++	    trackpoint_sysctl, "I",
++	    "Negative inertia factor");
++
++	/* hw.psm.trackpoint.upper_plateau */
++	sc->tpinfo.uplateau = 0x61;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "upper_plateau", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_UPPER_PLATEAU,
++	    trackpoint_sysctl, "I",
++	    "Transfer function upper plateau speed");
++
++	/* hw.psm.trackpoint.backup_range */
++	sc->tpinfo.reach = 0x0a;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "backup_range", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_BACKUP_RANGE,
++	    trackpoint_sysctl, "I",
++	    "Backup range");
++
++	/* hw.psm.trackpoint.drag_hysteresis */
++	sc->tpinfo.draghys = 0xff;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "drag_hysteresis", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_DRAG_HYSTERESIS,
++	    trackpoint_sysctl, "I",
++	    "Drag hysteresis");
++
++	/* hw.psm.trackpoint.minimum_drag */
++	sc->tpinfo.mindrag = 0x14;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "minimum_drag", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_MINIMUM_DRAG,
++	    trackpoint_sysctl, "I",
++	    "Minimum drag");
++
++	/* hw.psm.trackpoint.up_threshold */
++	sc->tpinfo.upthresh = 0xff;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "up_threshold", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_UP_THRESHOLD,
++	    trackpoint_sysctl, "I",
++	    "Up threshold for release");
++
++	/* hw.psm.trackpoint.threshold */
++	sc->tpinfo.threshold = 0x08;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "threshold", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_THRESHOLD,
++	    trackpoint_sysctl, "I",
++	    "Threshold");
++
++	/* hw.psm.trackpoint.jenks_curvature */
++	sc->tpinfo.jenks = 0x87;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "jenks_curvature", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_JENKS_CURVATURE,
++	    trackpoint_sysctl, "I",
++	    "Jenks curvature");
++
++	/* hw.psm.trackpoint.z_time */
++	sc->tpinfo.ztime = 0x26;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "z_time", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_Z_TIME,
++	    trackpoint_sysctl, "I",
++	    "Z time constant");
++
++	/* hw.psm.trackpoint.press_to_select */
++	sc->tpinfo.pts = 0x00;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "press_to_select", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_PRESS_TO_SELECT,
++	    trackpoint_sysctl, "I",
++	    "Press to Select");
++
++	/* hw.psm.trackpoint.skip_backups */
++	sc->tpinfo.skipback = 0x00;
++	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
++	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
++	    "skip_backups", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
++	    sc, TRACKPOINT_SYSCTL_SKIP_BACKUPS,
++	    trackpoint_sysctl, "I",
++	    "Skip backups from drags");
++}
++
++static int
++enable_trackpoint(struct psm_softc *sc)
++{
++	KBDC kbdc;
++	int id;
++
++	if (!trackpoint_support)
++		return (FALSE);
++
++	kbdc = sc->kbdc;
++	sc->hw.buttons = 3;
++
++	if (send_aux_command(kbdc, 0xe1) != PSM_ACK ||
++	    read_aux_data(kbdc) != 0x01 ||
++	    (id = read_aux_data(kbdc)) < 0x01)
++		return (FALSE);
++
++	sc->hw.hwid = id;
++
++	if (sc->tpinfo.sysctl_tree == NULL) {
++		trackpoint_sysctl_create_tree(sc);
++	} else { 
++		/*
++		 * If the tree already exist, then we are after a suspend/resume
++		 * cycle and the TrackPoint is reset to defaults. So we  have to 
++		 * set the stored values.
++		 */
++		trackpoint_command(kbdc, 0x81, 0x4a, sc->tpinfo.sensitivity);
++		trackpoint_command(kbdc, 0x81, 0x4d, sc->tpinfo.inertia);
++		trackpoint_command(kbdc, 0x81, 0x60, sc->tpinfo.uplateau);
++		trackpoint_command(kbdc, 0x81, 0x57, sc->tpinfo.reach);
++		trackpoint_command(kbdc, 0x81, 0x58, sc->tpinfo.draghys);
++		trackpoint_command(kbdc, 0x81, 0x59, sc->tpinfo.mindrag);
++		trackpoint_command(kbdc, 0x81, 0x5a, sc->tpinfo.upthresh);
++		trackpoint_command(kbdc, 0x81, 0x5c, sc->tpinfo.threshold);
++		trackpoint_command(kbdc, 0x81, 0x5d, sc->tpinfo.jenks);
++		trackpoint_command(kbdc, 0x81, 0x5e, sc->tpinfo.ztime);
++		if (sc->tpinfo.pts == 0x01)
++			trackpoint_command(kbdc, 0x47, 0x2c, 0x01);
++		if (sc->tpinfo.skipback == 0x01)
++			trackpoint_command(kbdc, 0x47, 0x2d, 0x08);
++	}
++
++	/*
++	 * TrackPoint will have to be reinitialized after
++	 * suspend/resume.
++	 */
++	sc->config |= PSM_CONFIG_HOOKRESUME | PSM_CONFIG_INITAFTERSUSPEND;
++
++	return (TRUE);
++}
++
+ /*
+  * Return true if 'now' is earlier than (start + (secs.usecs)).
+  * Now may be NULL and the function will fetch the current time from
+--- sys/sys/mouse.h.orig	2009-08-03 10:13:06.000000000 +0200
++++ sys/sys/mouse.h	2010-05-26 21:54:38.000000000 +0200
+@@ -141,6 +141,7 @@
+ #define MOUSE_MODEL_4D			11
+ #define MOUSE_MODEL_4DPLUS		12
+ #define MOUSE_MODEL_SYNAPTICS		13
++#define MOUSE_MODEL_TRACKPOINT		14
+ 
+ typedef struct mousemode {
+ 	int protocol;		/* MOUSE_PROTO_XXX */
+@@ -211,6 +212,9 @@
+ /* Synaptics Touchpad */
+ #define MOUSE_SYNAPTICS_PACKETSIZE	6	/* '3' works better */
+ 
++/* IBM/Lenovo TrackPoint */
++#define MOUSE_TRACKPOINT_PACKETSIZE	3
++
+ /* Microsoft Serial mouse data packet */
+ #define MOUSE_MSS_PACKETSIZE	3
+ #define MOUSE_MSS_SYNCMASK	0x40
